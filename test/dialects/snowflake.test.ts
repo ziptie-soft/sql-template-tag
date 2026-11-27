@@ -2,11 +2,13 @@ import * as fc from 'fast-check';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { inline as pinotInline } from '../../src/dialects/pinot.js';
 import {
   bareIdentifier,
   bind,
   identifier,
   inline,
+  rows,
   type SnowflakeBind,
   type SnowflakeOptions,
   SqlDialectError,
@@ -1256,6 +1258,354 @@ void describe('snowflake bind and inline parity', async () => {
       "SELECT TO_BINARY(?, 'HEX')",
     );
     assert.strictEqual(lit(new Uint8Array([1])), "TO_BINARY('01', 'HEX')");
+  });
+});
+
+const INSERT = (data: Parameters<typeof rows>[0]): Sql =>
+  sql`INSERT INTO t (a, b) VALUES ${rows(data)}`;
+
+void describe('snowflake rows', async () => {
+  await it('renders one placeholder row and a 2D bind array', () => {
+    assert.deepStrictEqual(
+      bind(
+        INSERT([
+          [1, 'a'],
+          [2, 'b'],
+          [3, null],
+        ]),
+      ),
+      {
+        sqlText: 'INSERT INTO t (a, b) VALUES (?, ?)',
+        binds: [
+          [1, 'a'],
+          [2, 'b'],
+          [3, null],
+        ],
+      },
+    );
+    assert.deepStrictEqual(bind(sql`VALUES ${rows([[1]])}`), {
+      sqlText: 'VALUES (?)',
+      binds: [[1]],
+    });
+  });
+
+  await it('returns a plain core Sql with text around the rows kept as is', () => {
+    assert.ok(rows([[1]]) instanceof Sql);
+    assert.deepStrictEqual(
+      bind(
+        sql`INSERT INTO ${identifier('t')} VALUES ${rows([[true, 1.5]])} /* tail */`,
+      ),
+      {
+        sqlText: 'INSERT INTO "t" VALUES (?, ?) /* tail */',
+        binds: [[true, 1.5]],
+      },
+    );
+  });
+
+  await it('binds a first row of plain primitives, never an array (no driver mix-up)', () => {
+    const { binds } = bind(INSERT([[DATE, 1n]]));
+    assert.ok(Array.isArray(binds[0]));
+    for (const cell of binds[0]) {
+      assert.ok(!Array.isArray(cell));
+      assert.ok(['string', 'number', 'boolean'].includes(typeof cell));
+    }
+  });
+
+  await it('normalizes every cell like bind: dates, bigint and bytes', () => {
+    const later = new Date(Date.UTC(2025, 5, 6, 7, 8, 9, 10));
+    assert.deepStrictEqual(
+      bind(
+        sql`VALUES ${rows([
+          [DATE, 1n, new Uint8Array([1]), true],
+          [later, -(2n ** 63n), Buffer.from([255]), null],
+        ])}`,
+      ),
+      {
+        sqlText: "VALUES (?, ?, TO_BINARY(?, 'HEX'), ?)",
+        binds: [
+          [DATE_ISO, '1', '01', true],
+          ['2025-06-06T07:08:09.010Z', '-9223372036854775808', 'ff', null],
+        ],
+      },
+    );
+  });
+
+  await it('lets null share a column with bytes in any row', () => {
+    const bytes = new Uint8Array([7]);
+    for (const data of [
+      [[null], [bytes]],
+      [[bytes], [null]],
+      [[null], [null]],
+    ]) {
+      const { sqlText } = bind(sql`V ${rows(data)}`);
+      assert.strictEqual(
+        sqlText,
+        data.some((row) => row[0] === bytes)
+          ? "V (TO_BINARY(?, 'HEX'))"
+          : 'V (?)',
+      );
+    }
+  });
+
+  await it('applies coerce to every cell', () => {
+    assert.deepStrictEqual(
+      bind(
+        INSERT([
+          [LUXON, 'a'],
+          [LUXON, undefined],
+        ]),
+        { coerce: (v) => (v === undefined ? null : toIso(v)) },
+      ),
+      {
+        sqlText: 'INSERT INTO t (a, b) VALUES (?, ?)',
+        binds: [
+          [DATE_ISO, 'a'],
+          [DATE_ISO, null],
+        ],
+      },
+    );
+  });
+
+  await it('reports unsupported cells at their flat position', () => {
+    throwsAt(
+      () =>
+        bind(
+          INSERT([
+            [1, 2],
+            [3, undefined],
+          ]),
+        ),
+      3,
+    );
+    throwsAt(() => bind(INSERT([[NaN, 2]])), 0);
+    throwsAt(
+      () =>
+        bind(
+          INSERT([
+            [1, 2],
+            [{}, 2],
+          ]),
+        ),
+      2,
+    );
+    throwsAt(
+      () =>
+        bind(
+          INSERT([
+            [1, 2],
+            [3, 4],
+          ]),
+          { coerce: (v) => (v === 4 ? {} : v) },
+        ),
+      3,
+    );
+  });
+
+  await it('rejects a column mixing bytes and non-bytes values', () => {
+    const bytes = new Uint8Array([1]);
+    throwsAt(
+      () =>
+        bind(
+          INSERT([
+            ['a', 1],
+            [bytes, 2],
+          ]),
+        ),
+      2,
+    );
+    throwsAt(
+      () =>
+        bind(
+          INSERT([
+            [bytes, 1],
+            ['a', 2],
+          ]),
+        ),
+      2,
+    );
+    throwsAt(
+      () =>
+        bind(
+          INSERT([
+            [1, bytes],
+            [2, 5],
+          ]),
+        ),
+      3,
+    );
+  });
+
+  await it('must be the only value in the query', () => {
+    const data = [[1, 2]];
+    throwsAt(() => bind(sql`SELECT ${1}, ${rows(data)}`), 1);
+    throwsAt(() => bind(sql`${rows(data)}, ${1}`), 0);
+    throwsAt(() => bind(sql`${rows(data)}${rows(data)}`), 0);
+    throwsAt(() => bind(sql`${rows(data)}, ${1}`, { coerce: (v) => v }), 0);
+    assert.throws(() => bind(sql`${rows(data)}, ${1}`), /only value/);
+  });
+
+  await it('rejects empty, malformed and non-array data eagerly', () => {
+    const bad: unknown[] = [
+      [],
+      [[]],
+      [[1], []],
+      [[1, 2], [3]],
+      [[1], [2, 3]],
+      [1],
+      ['ab'],
+      [{ length: 1, 0: 1 }],
+      [null],
+      'ab',
+      undefined,
+      null,
+      {},
+    ];
+    for (const data of bad) {
+      throwsAt(() => rows(data as never), undefined);
+    }
+  });
+
+  await it('names the offending row for ragged data', () => {
+    assert.throws(
+      () => rows([[1, 2], [3, 4], [5]]),
+      /row 2 has 1 cells, expected 2/,
+    );
+    assert.throws(
+      () => rows([[1], [2], []]),
+      /row 2 must be a non-empty array/,
+    );
+    assert.throws(
+      () => rows([[1], 5 as never]),
+      /row 1 must be a non-empty array/,
+    );
+  });
+
+  await it('rejects Sql fragments as cells', () => {
+    for (const cell of [sql`1`, raw('x'), empty, join([1, 2])]) {
+      assert.throws(
+        () =>
+          rows([
+            [1, 2],
+            [3, cell],
+          ]),
+        (error: unknown) => {
+          assert.ok(error instanceof SqlDialectError);
+          assert.match(
+            error.reason,
+            /cell \[1\]\[1\] must not be a Sql fragment/,
+          );
+          return true;
+        },
+      );
+    }
+  });
+
+  await it('copies the data: later changes do not affect the binds', () => {
+    const data: unknown[][] = [
+      [1, 'a'],
+      [2, 'b'],
+    ];
+    const fragment = INSERT(data);
+    data[0]![0] = 99;
+    data[1]!.push('extra');
+    data.push([3, 'c']);
+    assert.deepStrictEqual(bind(fragment).binds, [
+      [1, 'a'],
+      [2, 'b'],
+    ]);
+  });
+
+  await it('reads each cell once, even from a hostile array', () => {
+    let reads = 0;
+    const hostile = new Proxy([1, 2], {
+      get(target, key, receiver) {
+        if (key === '0') {
+          reads++;
+          return reads === 1 ? 'first' : "x' OR 1=1 --";
+        }
+
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    const fragment = rows([hostile]);
+    assert.deepStrictEqual(bind(sql`V ${fragment}`).binds, [['first', 2]]);
+    assert.deepStrictEqual(bind(sql`V ${fragment}`).binds, [['first', 2]]);
+  });
+
+  await it('cannot be forged from the private marker', () => {
+    const marker = rows([[1]]).values[0] as object;
+    const fakes: unknown[] = [
+      { rows: [[1]] },
+      Object.create(marker),
+      Object.assign(Object.create(Object.getPrototypeOf(marker)), {
+        rows: [[1]],
+      }),
+      new Proxy(marker, {}),
+    ];
+    for (const fake of fakes) {
+      throwsAt(() => bind(sql`SELECT ${fake}`), 0);
+      throwsAt(() => inline(sql`SELECT ${fake}`), 0);
+    }
+
+    assert.ok(Object.isFrozen(marker));
+  });
+
+  await it('is rejected by inline() with a clear reason and by Pinot inline()', () => {
+    const query = INSERT([[1, 2]]);
+    assert.throws(
+      () => inline(query),
+      (error: unknown) => {
+        assert.ok(error instanceof SqlDialectError);
+        assert.strictEqual(error.dialect, 'snowflake');
+        assert.strictEqual(error.index, 0);
+        assert.match(error.reason, /rows\(\) only works with bind\(\)/);
+        return true;
+      },
+    );
+    assert.throws(
+      () => pinotInline(query),
+      (error: unknown) => {
+        assert.ok(error instanceof SqlDialectError);
+        assert.strictEqual(error.dialect, 'pinot');
+        assert.strictEqual(error.index, 0);
+        return true;
+      },
+    );
+  });
+
+  await it('spreads into connection.execute and never touches core getters', () => {
+    const calls: SnowflakeStatement[] = [];
+    const connection = {
+      execute(options: SnowflakeStatement & { complete: () => void }): void {
+        calls.push(options);
+        options.complete();
+      },
+    };
+    let completed = 0;
+    connection.execute({
+      ...bind(
+        INSERT([
+          [1, 'a'],
+          [2, 'b'],
+        ]),
+      ),
+      complete: () => {
+        completed++;
+      },
+    });
+    assert.strictEqual(completed, 1);
+    assert.deepStrictEqual(Object.keys(calls[0] as object).toSorted(), [
+      'binds',
+      'complete',
+      'sqlText',
+    ]);
+    assert.strictEqual(calls[0]?.sqlText, 'INSERT INTO t (a, b) VALUES (?, ?)');
+    assert.deepStrictEqual(calls[0]?.binds, [
+      [1, 'a'],
+      [2, 'b'],
+    ]);
+    // The core getters see the opaque marker; rows() is for bind() only.
+    assert.strictEqual(INSERT([[1, 2]]).values.length, 1);
   });
 });
 

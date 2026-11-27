@@ -8,5 +8,6 @@ export const {
   bind,
   identifier,
   inline,
+  rows,
   variant,
 } = cjs;
