@@ -5,6 +5,11 @@
  * identifiers with `""`, `--` and nested `/* *\/` comments, `X'…'` binary literals and the
  * `N'…'` / `U&'…'` prefixed strings. It never throws: anything unclosed becomes an
  * `unterminated` token, so a test can assert on what a hostile value would have turned into.
+ *
+ * `tokenizeSnowflake` differs as documented there: `'…'` also processes backslash escapes
+ * (`\\`, `\'`, `\0`, `\n`, `\t`, `\r`, `\b`, `\f`; any other `\x` decodes to `x`, so an escape
+ * can never be mistaken for a closing quote), `$$…$$` strings are verbatim, `//` starts a line
+ * comment, and the `N'…'` / `U&'…'` prefixes do not exist.
  */
 
 export type TokenKind =
@@ -27,6 +32,17 @@ export interface Token {
   /** `N` or `U&` for prefixed strings; empty otherwise. */
   readonly prefix: string;
 }
+
+/** Lexical differences between the dialects. */
+interface Flavor {
+  /** A backslash escapes the next character inside `'…'` (Snowflake). */
+  readonly backslash: boolean;
+  /** Dollar-quoted strings and `//` line comments (Snowflake). */
+  readonly snowflake: boolean;
+}
+
+const PINOT: Flavor = { backslash: false, snowflake: false };
+const SNOWFLAKE: Flavor = { backslash: true, snowflake: true };
 
 const SINGLE = "'";
 const DOUBLE = '"';
@@ -88,12 +104,35 @@ interface Quoted {
   readonly closed: boolean;
 }
 
+/** Snowflake escapes we are sure of; any other `\x` decodes to `x`, so it can never end a string. */
+const SNOWFLAKE_ESCAPES: Readonly<Record<string, string>> = {
+  '0': '\0',
+  'n': '\n',
+  't': '\t',
+  'r': '\r',
+  'b': '\b',
+  'f': '\f',
+};
+
 /** Scan a quoted body from the opening quote at `start`; a doubled quote decodes to one. */
-function scanQuoted(sql: string, start: number, quote: string): Quoted {
+function scanQuoted(
+  sql: string,
+  start: number,
+  quote: string,
+  flavor: Flavor,
+): Quoted {
   let value = '';
   let i = start + 1;
   while (i < sql.length) {
-    if (sql[i] !== quote) {
+    if (flavor.backslash && quote === SINGLE && sql[i] === '\\') {
+      if (i + 1 >= sql.length) {
+        break;
+      }
+
+      const escaped = sql[i + 1] as string;
+      value += SNOWFLAKE_ESCAPES[escaped] ?? escaped;
+      i += 2;
+    } else if (sql[i] !== quote) {
       value += sql[i];
       i++;
     } else if (sql[i + 1] === quote) {
@@ -113,13 +152,28 @@ function quotedToken(
   quote: string,
   kind: TokenKind,
   prefix: string,
+  flavor: Flavor,
   tokenStart = start,
 ): Token {
-  const { end, value, closed } = scanQuoted(sql, start, quote);
+  const { end, value, closed } = scanQuoted(sql, start, quote, flavor);
   const text = sql.slice(tokenStart, end);
   return closed
     ? token(kind, text, value, prefix)
     : token('unterminated', text);
+}
+
+/** A Snowflake dollar-quoted string: verbatim body, no escapes. */
+function dollarString(sql: string, start: number): Token {
+  const close = sql.indexOf('$$', start + 2);
+  if (close === -1) {
+    return token('unterminated', sql.slice(start));
+  }
+
+  return token(
+    'string',
+    sql.slice(start, close + 2),
+    sql.slice(start + 2, close),
+  );
 }
 
 function lineComment(sql: string, start: number): Token {
@@ -169,22 +223,22 @@ function number(sql: string, start: number): Token {
 }
 
 /** A word, or a prefixed string when the word is directly followed by a quote. */
-function word(sql: string, start: number): Token {
+function word(sql: string, start: number, flavor: Flavor): Token {
   const end = run(sql, start, isWordPart);
   const text = sql.slice(start, end);
   const upper = text.toUpperCase();
   if (sql[end] === SINGLE) {
     if (upper === 'X') {
-      return quotedToken(sql, end, SINGLE, 'binary', '', start);
+      return quotedToken(sql, end, SINGLE, 'binary', '', flavor, start);
     }
 
-    if (upper === 'N') {
-      return quotedToken(sql, end, SINGLE, 'string', 'N', start);
+    if (upper === 'N' && !flavor.snowflake) {
+      return quotedToken(sql, end, SINGLE, 'string', 'N', flavor, start);
     }
   }
 
-  if (upper === 'U' && sql.startsWith("&'", end)) {
-    return quotedToken(sql, end + 1, SINGLE, 'string', 'U&', start);
+  if (upper === 'U' && !flavor.snowflake && sql.startsWith("&'", end)) {
+    return quotedToken(sql, end + 1, SINGLE, 'string', 'U&', flavor, start);
   }
 
   return token('word', text);
@@ -200,42 +254,56 @@ function operator(sql: string, start: number): Token {
   );
 }
 
-function scanToken(sql: string, start: number): Token {
+/** Comments, plus Snowflake's dollar-quoted strings, which also start with two fixed characters. */
+function scanOpener(
+  sql: string,
+  start: number,
+  flavor: Flavor,
+): Token | undefined {
+  const pair = sql.slice(start, start + 2);
+  if (pair === '--' || (flavor.snowflake && pair === '//')) {
+    return lineComment(sql, start);
+  }
+
+  if (flavor.snowflake && pair === '$$') {
+    return dollarString(sql, start);
+  }
+
+  return pair === '/*' ? blockComment(sql, start) : undefined;
+}
+
+function scanToken(sql: string, start: number, flavor: Flavor): Token {
   const char = sql[start];
   const next = sql[start + 1];
   if (isSpace(char)) {
     return token('whitespace', sql.slice(start, run(sql, start, isSpace)));
   }
 
-  if (char === '-' && next === '-') {
-    return lineComment(sql, start);
-  }
-
-  if (char === '/' && next === '*') {
-    return blockComment(sql, start);
+  const opener = scanOpener(sql, start, flavor);
+  if (opener !== undefined) {
+    return opener;
   }
 
   if (char === SINGLE) {
-    return quotedToken(sql, start, SINGLE, 'string', '');
+    return quotedToken(sql, start, SINGLE, 'string', '', flavor);
   }
 
   if (char === DOUBLE) {
-    return quotedToken(sql, start, DOUBLE, 'identifier', '');
+    return quotedToken(sql, start, DOUBLE, 'identifier', '', flavor);
   }
 
   if (isDigit(char) || (char === '.' && isDigit(next))) {
     return number(sql, start);
   }
 
-  return isWordStart(char) ? word(sql, start) : operator(sql, start);
+  return isWordStart(char) ? word(sql, start, flavor) : operator(sql, start);
 }
 
-/** Split Pinot SQL into tokens; the token texts always concatenate back to the input. */
-export function tokenizePinot(sql: string): Token[] {
+function tokenize(sql: string, flavor: Flavor): Token[] {
   const tokens: Token[] = [];
   let i = 0;
   while (i < sql.length) {
-    const next = scanToken(sql, i);
+    const next = scanToken(sql, i, flavor);
     tokens.push(next);
     i += next.text.length;
   }
@@ -243,10 +311,23 @@ export function tokenizePinot(sql: string): Token[] {
   return tokens;
 }
 
+/** Split Pinot SQL into tokens; the token texts always concatenate back to the input. */
+export function tokenizePinot(sql: string): Token[] {
+  return tokenize(sql, PINOT);
+}
+
+/** Split Snowflake SQL into tokens (backslash escapes, `$$` strings, `//` comments). */
+export function tokenizeSnowflake(sql: string): Token[] {
+  return tokenize(sql, SNOWFLAKE);
+}
+
 /** Compact, whitespace-free token summaries for readable assertions. */
-export function summarize(sql: string): string[] {
+export function summarize(
+  sql: string,
+  tokenizer: (sql: string) => Token[] = tokenizePinot,
+): string[] {
   const out: string[] = [];
-  for (const { kind, text, value, prefix } of tokenizePinot(sql)) {
+  for (const { kind, text, value, prefix } of tokenizer(sql)) {
     if (kind === 'whitespace') {
       continue;
     }

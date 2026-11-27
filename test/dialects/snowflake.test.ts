@@ -6,6 +6,7 @@ import {
   bareIdentifier,
   bind,
   identifier,
+  inline,
   type SnowflakeBind,
   type SnowflakeOptions,
   SqlDialectError,
@@ -13,6 +14,13 @@ import {
   variant,
 } from '../../src/dialects/snowflake.js';
 import sql, { bulk, empty, join, raw, Sql } from '../../src/index.js';
+import {
+  quotedIdentifiers,
+  statementCount,
+  stringLiterals,
+  summarize,
+  tokenizeSnowflake,
+} from './tokenizers.js';
 
 function throwsAt(fn: () => unknown, index: number | undefined): void {
   assert.throws(fn, (error: unknown) => {
@@ -36,6 +44,27 @@ function placeholders(text: string): number {
 
 const DATE = new Date(Date.UTC(2024, 0, 2, 3, 4, 5, 6));
 const DATE_ISO = '2024-01-02T03:04:05.006Z';
+
+// Subclasses whose overridden methods would return SQL text if a renderer called them.
+class EvilDate extends Date {
+  override toISOString(): string {
+    return "x'; DROP TABLE t; --";
+  }
+  override getTime(): number {
+    return NaN;
+  }
+  override toJSON(): string {
+    return 'evil';
+  }
+}
+class EvilBytes extends Uint8Array {
+  override get length(): number {
+    return 99;
+  }
+  toHex(): string {
+    return "'; DROP TABLE t; --";
+  }
+}
 
 void describe('snowflake bind scalars', async () => {
   await it('binds null and booleans as-is', () => {
@@ -138,53 +167,40 @@ void describe('snowflake bind scalars', async () => {
   });
 
   await it('ignores Date and Uint8Array subclasses that override methods', () => {
-    class EvilDate extends Date {
-      override toISOString(): string {
-        return "x'; DROP TABLE t; --";
-      }
-      override getTime(): number {
-        return NaN;
-      }
-      override toJSON(): string {
-        return 'evil';
-      }
-    }
-    class EvilBytes extends Uint8Array {
-      override get length(): number {
-        return 99;
-      }
-      toHex(): string {
-        return "'; DROP TABLE t; --";
-      }
-    }
     assert.strictEqual(one(new EvilDate(DATE.getTime())), DATE_ISO);
     assert.strictEqual(one(new EvilBytes([1, 2])), '0102');
   });
 });
 
+class Custom {
+  readonly a = 1;
+}
+
+const REJECTED: [string, unknown][] = [
+  ['undefined', undefined],
+  ['symbol', Symbol('x')],
+  ['function', () => 1],
+  ['object', {}],
+  ['empty array', []],
+  ['array', [1]],
+  ['Map', new Map()],
+  ['Set', new Set()],
+  ['null-prototype object', Object.create(null)],
+  ['class instance', new Custom()],
+  ['parsed JSON', JSON.parse('{"a":1}') as unknown],
+  ['Uint16Array', new Uint16Array(1)],
+  ['ArrayBuffer', new ArrayBuffer(1)],
+];
+
+const LUXON = { toISO: (): string => DATE_ISO };
+const toIso = (value: unknown): unknown =>
+  typeof value === 'object' && value !== null && 'toISO' in value
+    ? (value as typeof LUXON).toISO()
+    : value;
+
 void describe('snowflake bind rejections', async () => {
-  class Custom {
-    readonly a = 1;
-  }
-
-  const rejected: [string, unknown][] = [
-    ['undefined', undefined],
-    ['symbol', Symbol('x')],
-    ['function', () => 1],
-    ['object', {}],
-    ['empty array', []],
-    ['array', [1]],
-    ['Map', new Map()],
-    ['Set', new Set()],
-    ['null-prototype object', Object.create(null)],
-    ['class instance', new Custom()],
-    ['parsed JSON', JSON.parse('{"a":1}') as unknown],
-    ['Uint16Array', new Uint16Array(1)],
-    ['ArrayBuffer', new ArrayBuffer(1)],
-  ];
-
   await it('throws SqlDialectError with the value index', () => {
-    for (const [name, value] of rejected) {
+    for (const [name, value] of REJECTED) {
       assert.throws(
         () => bind(sql`SELECT ${1}, ${2}, ${value}`),
         (error: unknown) => {
@@ -208,11 +224,8 @@ void describe('snowflake bind rejections', async () => {
 });
 
 void describe('snowflake bind coerce', async () => {
-  const luxon = { toISO: (): string => DATE_ISO };
-  const coerce = (value: unknown): unknown =>
-    typeof value === 'object' && value !== null && 'toISO' in value
-      ? (value as typeof luxon).toISO()
-      : value;
+  const luxon = LUXON;
+  const coerce = toIso;
 
   await it('maps custom objects to supported binds', () => {
     assert.deepStrictEqual(
@@ -735,6 +748,517 @@ void describe('snowflake structural checks', async () => {
   });
 });
 
+/** Render one value after `SELECT `, so no fusion guard is involved. */
+function lit(value: unknown, options?: SnowflakeOptions): string {
+  return inline(sql`SELECT ${value}`, options).slice('SELECT '.length);
+}
+
+void describe('snowflake inline scalars', async () => {
+  await it('renders null and booleans', () => {
+    assert.strictEqual(lit(null), 'NULL');
+    assert.strictEqual(lit(true), 'TRUE');
+    assert.strictEqual(lit(false), 'FALSE');
+  });
+
+  await it('renders numbers', () => {
+    const cases: [number, string][] = [
+      [0, '0'],
+      [-0, '0'],
+      [-1, '-1'],
+      [1.5, '1.5'],
+      [1e-7, '1e-7'],
+      [2 ** 53 - 1, '9007199254740991'],
+      [-(2 ** 53 - 1), '-9007199254740991'],
+    ];
+    for (const [value, expected] of cases) {
+      assert.strictEqual(lit(value), expected);
+    }
+  });
+
+  await it('rejects unsafe integers, NaN and infinities with the value index', () => {
+    for (const value of [2 ** 53, -(2 ** 53), NaN, Infinity, -Infinity]) {
+      throwsAt(() => inline(sql`SELECT ${1}, ${value}`), 1);
+    }
+  });
+
+  await it('renders bigint as digits', () => {
+    assert.strictEqual(lit(0n), '0');
+    assert.strictEqual(lit(-(2n ** 63n)), '-9223372036854775808');
+    assert.strictEqual(lit(2n ** 64n), '18446744073709551616');
+  });
+
+  await it('escapes backslashes, quotes and NUL in strings', () => {
+    const cases: [string, string][] = [
+      ['', "''"],
+      ['abc', "'abc'"],
+      ["it's", "'it''s'"],
+      ["'", "''''"],
+      ['héllo 🙂 日本', "'héllo 🙂 日本'"],
+      ['a\nb\r\nc', "'a\nb\r\nc'"],
+      ['back\\slash', "'back\\\\slash'"],
+      ['\\', "'\\\\'"],
+      ["\\'", "'\\\\'''"],
+      ["\\\\'", "'\\\\\\\\'''"],
+      ['a"b', "'a\"b'"],
+      ['\0', "'\\0'"],
+      ['a\0b', "'a\\0b'"],
+      ['\x1a', "'\x1a'"],
+      ['$$', "'$$'"],
+      ['\ud800', "'\ud800'"],
+    ];
+    for (const [value, expected] of cases) {
+      assert.strictEqual(lit(value), expected);
+    }
+  });
+
+  await it('renders dates as ISO-8601 UTC strings', () => {
+    assert.strictEqual(lit(DATE), `'${DATE_ISO}'`);
+    assert.strictEqual(lit(new Date(0)), "'1970-01-01T00:00:00.000Z'");
+  });
+
+  await it('rejects invalid and out-of-range dates', () => {
+    throwsAt(() => inline(sql`SELECT ${new Date(NaN)}`), 0);
+    throwsAt(() => inline(sql`SELECT ${1}, ${new Date(8.64e15)}`), 1);
+  });
+
+  await it('renders bytes as TO_BINARY hex literals', () => {
+    assert.strictEqual(lit(new Uint8Array([])), "TO_BINARY('', 'HEX')");
+    assert.strictEqual(
+      lit(new Uint8Array([0, 255])),
+      "TO_BINARY('00ff', 'HEX')",
+    );
+    assert.strictEqual(
+      lit(Buffer.from([1, 2, 171])),
+      "TO_BINARY('0102ab', 'HEX')",
+    );
+  });
+
+  await it('ignores Date and Uint8Array subclasses that override methods', () => {
+    assert.strictEqual(lit(new EvilDate(DATE.getTime())), `'${DATE_ISO}'`);
+    assert.strictEqual(lit(new EvilBytes([1, 2])), "TO_BINARY('0102', 'HEX')");
+  });
+
+  await it('rejects unsupported values with the value index', () => {
+    for (const [name, value] of REJECTED) {
+      assert.throws(
+        () => inline(sql`SELECT ${1}, ${2}, ${value}`),
+        (error: unknown) => {
+          assert.ok(error instanceof SqlDialectError, name);
+          assert.strictEqual(error.index, 2, name);
+          return true;
+        },
+        name,
+      );
+    }
+
+    throwsAt(() => inline(sql`SELECT ${join([1, undefined])}`), 1);
+  });
+});
+
+void describe('snowflake inline coerce', async () => {
+  await it('maps custom objects to supported literals', () => {
+    assert.strictEqual(
+      inline(sql`SELECT ${LUXON}, ${1}, ${'a'}`, { coerce: toIso }),
+      `SELECT '${DATE_ISO}', 1, 'a'`,
+    );
+  });
+
+  await it('can map undefined to NULL', () => {
+    assert.strictEqual(
+      lit(undefined, { coerce: (v) => (v === undefined ? null : v) }),
+      'NULL',
+    );
+  });
+
+  await it('cannot smuggle raw SQL: the result is quoted like any string', () => {
+    assert.strictEqual(
+      lit(1, { coerce: () => "x' OR 1=1 --" }),
+      "'x'' OR 1=1 --'",
+    );
+    assert.strictEqual(lit(1, { coerce: () => "\\'; --" }), "'\\\\''; --'");
+  });
+
+  await it('rejects a coerce result that is not a supported value', () => {
+    const results: unknown[] = [{}, [], undefined, sql`SELECT 1`, () => 1];
+    for (const result of results) {
+      throwsAt(
+        () => inline(sql`SELECT ${1}, ${2}`, { coerce: () => result }),
+        0,
+      );
+    }
+  });
+
+  await it('rejects invalid options and accepts empty ones', () => {
+    const bad: unknown[] = [{ coerce: 'x' }, { coerce: null }, null, 42, 'a'];
+    for (const options of bad) {
+      throwsAt(() => inline(sql`SELECT ${1}`, options as never), undefined);
+    }
+
+    assert.strictEqual(inline(sql`SELECT ${1}`, {}), 'SELECT 1');
+  });
+});
+
+interface InlineContext {
+  readonly name: string;
+  readonly build: (value: string) => Sql;
+  /** The string literals the rendered text must decode to. */
+  readonly literals: (value: string) => string[];
+}
+
+const INLINE_CONTEXTS: readonly InlineContext[] = [
+  {
+    name: 'sql',
+    build: (s) => sql`SELECT ${s}`,
+    literals: (s) => [s],
+  },
+  {
+    name: 'join',
+    build: (s) => sql`SELECT 1 WHERE a IN (${join([s, 'x', s])})`,
+    literals: (s) => [s, 'x', s],
+  },
+  {
+    name: 'bulk',
+    build: (s) =>
+      sql`INSERT INTO t VALUES ${bulk([
+        [s, 1],
+        ['y', s],
+      ])}`,
+    literals: (s) => [s, 'y', s],
+  },
+  {
+    name: 'variant',
+    build: (s) => sql`CALL p(${variant({ k: s, list: [s] })})`,
+    literals: (s) => [JSON.stringify({ k: s, list: [s] })],
+  },
+];
+
+function assertInert(text: string, literals: string[], label: string): void {
+  const tokens = tokenizeSnowflake(text);
+  assert.deepStrictEqual(stringLiterals(tokens), literals, label);
+  assert.ok(
+    tokens.every((t) => t.kind !== 'comment' && t.kind !== 'unterminated'),
+    label,
+  );
+  assert.strictEqual(statementCount(tokens), 1, label);
+}
+
+void describe('snowflake inline injection corpus', async () => {
+  for (const { name, build, literals } of INLINE_CONTEXTS) {
+    await it(`decodes every value back to string literals (${name})`, () => {
+      for (const value of CORPUS) {
+        const text = inline(build(value));
+        const label = `${JSON.stringify(value)} -> ${JSON.stringify(text)}`;
+        assertInert(text, literals(value), label);
+      }
+    });
+  }
+
+  await it('decodes hostile identifiers back to one quoted identifier', () => {
+    for (const value of CORPUS) {
+      if (value === '' || value.includes('\0')) {
+        continue;
+      }
+
+      const text = inline(sql`SELECT ${identifier(value)} FROM t`);
+      const tokens = tokenizeSnowflake(text);
+      assert.deepStrictEqual(quotedIdentifiers(tokens), [value], text);
+      assert.strictEqual(statementCount(tokens), 1, text);
+      assert.ok(
+        tokens.every((t) => t.kind !== 'comment'),
+        text,
+      );
+    }
+  });
+
+  await it('keeps the classic backslash breakout inert', () => {
+    assert.strictEqual(
+      lit("\\'; DROP TABLE t; --"),
+      "'\\\\''; DROP TABLE t; --'",
+    );
+    assert.strictEqual(lit("\\\\'"), "'\\\\\\\\'''");
+    assert.strictEqual(lit('$$; DROP TABLE t; $$'), "'$$; DROP TABLE t; $$'");
+  });
+
+  await it('renders a variant payload as one escaped string argument', () => {
+    const payload = { a: ["it's", 'back\\slash'] };
+    assert.strictEqual(
+      inline(sql`CALL p(${variant(payload)})`),
+      'CALL p(PARSE_JSON(\'{"a":["it\'\'s","back\\\\\\\\slash"]}\'))',
+    );
+  });
+});
+
+// Whole-token chunks (escape sequences, comment and dollar-quote openers) on top of the
+// single characters of `hostileChar`, so every interesting adjacency appears often.
+const hostileChunk = fc.constantFrom(
+  "\\'",
+  "\\\\'",
+  "'\\",
+  '\\\\',
+  '$$',
+  '//',
+  '--',
+  '/*',
+  '*/',
+  "'",
+  '\\',
+  '\0',
+  '\n',
+  '\\0',
+  'é',
+  '🙂',
+  '\ud800',
+  '\udc00',
+);
+const hostileText = fc.oneof(
+  hostileString,
+  fc.array(hostileChunk, { maxLength: 12 }).map((chunks) => chunks.join('')),
+);
+
+void describe('snowflake inline round-trip properties', async () => {
+  await it('decodes an inlined string back to the input', () => {
+    fc.assert(
+      fc.property(hostileText, (s) => {
+        const tokens = tokenizeSnowflake(inline(sql`SELECT ${s}`));
+        assert.deepStrictEqual(stringLiterals(tokens), [s]);
+        assert.ok(tokens.every((t) => t.kind !== 'comment'));
+        assert.strictEqual(statementCount(tokens), 1);
+      }),
+      { numRuns: 2000 },
+    );
+  });
+
+  await it('adds no statements or comments around two values and a trailing comment', () => {
+    fc.assert(
+      fc.property(hostileText, hostileText, (a, b) => {
+        const text = inline(sql`SELECT ${a}, ${b} // c`);
+        const tokens = tokenizeSnowflake(text);
+        assert.deepStrictEqual(stringLiterals(tokens), [a, b], text);
+        assert.strictEqual(statementCount(tokens), 1, text);
+        assert.strictEqual(
+          tokens.filter((t) => t.kind === 'comment').length,
+          1,
+        );
+        assert.ok(
+          tokens.every((t) => t.kind !== 'unterminated'),
+          text,
+        );
+      }),
+      { numRuns: 1000 },
+    );
+  });
+
+  await it('decodes strings between template text without fusion', () => {
+    fc.assert(
+      fc.property(hostileText, hostileText, (a, b) => {
+        const text = inline(sql`SELECT x=${a}AND y=${b}--tail`);
+        const tokens = tokenizeSnowflake(text);
+        assert.deepStrictEqual(stringLiterals(tokens), [a, b]);
+        assert.strictEqual(
+          tokens.filter((t) => t.kind === 'comment').length,
+          1,
+        );
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  await it('decodes hostile identifiers back to the input', () => {
+    fc.assert(
+      fc.property(
+        hostileText.filter((s) => s !== '' && !s.includes('\0')),
+        (s) => {
+          const tokens = tokenizeSnowflake(
+            inline(sql`SELECT ${identifier(s)}`),
+          );
+          assert.deepStrictEqual(quotedIdentifiers(tokens), [s]);
+          assert.ok(tokens.every((t) => t.kind !== 'comment'));
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+
+  await it('renders finite numbers parseable back to the input', () => {
+    fc.assert(
+      fc.property(
+        fc
+          .double({ noNaN: true, noDefaultInfinity: true })
+          .filter((n) => !Number.isInteger(n) || Number.isSafeInteger(n)),
+        (n) => {
+          // `==` semantics on purpose: -0 renders as `0`.
+          assert.ok(Number(lit(n)) === n, lit(n));
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+
+  await it('renders bytes as hex that decodes back to the input', () => {
+    fc.assert(
+      fc.property(fc.uint8Array({ maxLength: 64 }), (bytes) => {
+        const text = lit(bytes);
+        const match = /^TO_BINARY\('((?:[0-9a-f]{2})*)', 'HEX'\)$/.exec(text);
+        assert.ok(match !== null, text);
+        assert.deepStrictEqual(
+          Uint8Array.from(Buffer.from(match[1] as string, 'hex')),
+          bytes,
+        );
+      }),
+      { numRuns: 200 },
+    );
+  });
+});
+
+const tokens = (query: Sql): string[] =>
+  summarize(inline(query), tokenizeSnowflake);
+
+void describe('snowflake inline token fusion', async () => {
+  await it('keeps adjacent literals and text apart', () => {
+    const cases: [Sql, string[]][] = [
+      [sql`a-${-1}`, ['a', '-', '-', '1']],
+      [sql`${"a'"}${"b'"}`, ["str(a')", "str(b')"]],
+      [sql`X${'41'}`, ['X', 'str(41)']],
+      [sql`$${1}`, ['$', '1']],
+      [sql`t.${5}`, ['t', '.', '5']],
+      [sql`${1}e5`, ['1', 'e5']],
+      [sql`${true}$$x$$`, ['TRUE', 'str(x)']],
+      [sql`${'a'}'b'`, ['str(a)', 'str(b)']],
+      [sql`${1}x`, ['1', 'x']],
+      [sql`a.${'b'}`, ['a', '.', 'str(b)']],
+      [sql`${'a'}$$b$$`, ['str(a)', 'str(b)']],
+    ];
+    for (const [query, expected] of cases) {
+      assert.deepStrictEqual(tokens(query), expected, inline(query));
+    }
+  });
+
+  await it('does not turn a negative number after a minus or slash into a comment', () => {
+    assert.ok(!inline(sql`a-${-1}`).includes('--'));
+    assert.ok(!inline(sql`a/${'x'}`).includes('//'));
+    assert.deepStrictEqual(tokens(sql`a/${'x'}`), ['a', '/', 'str(x)']);
+  });
+
+  await it('does not fuse non-ASCII neighbours', () => {
+    assert.deepStrictEqual(tokens(sql`é${1}`), ['é', '1']);
+    assert.deepStrictEqual(tokens(sql`${1}é`), ['1', 'é']);
+  });
+
+  await it('passes other text through byte for byte', () => {
+    assert.strictEqual(inline(sql`(${1},${2})`), '(1,2)');
+    assert.strictEqual(inline(sql`a = ${1} AND b<${'x'}`), "a = 1 AND b<'x'");
+    assert.strictEqual(inline(sql`${1} + 1`), '1 + 1');
+    assert.strictEqual(inline(sql`${1}`), '1');
+    assert.strictEqual(inline(sql`SELECT ${1} -- tail`), 'SELECT 1 -- tail');
+    assert.strictEqual(inline(sql`SELECT ${1} // tail`), 'SELECT 1 // tail');
+  });
+
+  await it('keeps a literal that ends a chunk from fusing with the next literal', () => {
+    assert.strictEqual(inline(sql`${'a'}${'b'}`), "'a' 'b'");
+    assert.strictEqual(inline(sql`${1}${2}`), '1 2');
+    assert.strictEqual(inline(sql`${1},${2}`), '1,2');
+  });
+});
+
+void describe('snowflake inline text and context guard', async () => {
+  await it('renders multi-statement requests', () => {
+    const text = inline(sql`SET x = ${1}; SELECT ${'a'};`);
+    assert.strictEqual(text, "SET x = 1; SELECT 'a';");
+    assert.strictEqual(statementCount(tokenizeSnowflake(text)), 2);
+  });
+
+  await it('keeps a bare ? in template text, unlike bind', () => {
+    assert.strictEqual(inline(sql`SELECT ? , ${1}`), 'SELECT ? , 1');
+    assert.strictEqual(inline(sql`SELECT ${raw('?')}, ${1}`), 'SELECT ?, 1');
+    throwsAt(() => bind(sql`SELECT ? , ${1}`), undefined);
+  });
+
+  await it('rejects values inside quotes and comments', () => {
+    const queries: Sql[] = [
+      sql`SELECT '${'v'}'`,
+      sql`SELECT 'it''s ${'v'}'`,
+      sql`SELECT 'it\\'s ${'v'}'`,
+      sql`SELECT "${'v'}"`,
+      sql`SELECT $$ ${'v'} $$`,
+      sql`SELECT 1 -- ${'v'}\n`,
+      sql`SELECT 1 // ${'v'}\n`,
+      sql`SELECT 1 /* ${'v'} */`,
+      sql`SELECT 'a${'v'}b${1}c'`,
+    ];
+    for (const query of queries) {
+      throwsAt(() => inline(query), 0);
+    }
+  });
+
+  await it('rejects raw quote wrapping and unterminated contexts', () => {
+    throwsAt(() => inline(sql`${raw("'")}${'v'}${raw("'")}`), 0);
+    throwsAt(() => inline(sql`${raw('$$')}${'v'}${raw('$$')}`), 0);
+    throwsAt(() => inline(sql`SELECT 'abc`), undefined);
+    throwsAt(() => inline(sql`SELECT ${1} /* abc`), undefined);
+  });
+
+  await it('accepts values after closed contexts and rejects malformed queries', () => {
+    assert.strictEqual(
+      inline(sql`SELECT '?' /* x */ ${1}`),
+      "SELECT '?' /* x */ 1",
+    );
+    assert.strictEqual(inline(sql`SELECT $$a'b$$, ${1}`), "SELECT $$a'b$$, 1");
+
+    const extraValue = sql`SELECT ${1}`;
+    extraValue.values.push(2);
+    throwsAt(() => inline(extraValue), undefined);
+    throwsAt(() => inline(null as never), undefined);
+  });
+
+  await it('never mutates the input and is deterministic', () => {
+    const query = sql`SELECT ${DATE}, ${1n}, ${new Uint8Array([1])} -- tail`;
+    const strings = [...query.strings];
+    const values = [...query.values];
+    const first = inline(query);
+    assert.strictEqual(inline(query), first);
+    assert.strictEqual(inline(structuredClone<Sql>(query)), first);
+    assert.deepStrictEqual(query.strings, strings);
+    assert.deepStrictEqual(query.values, values);
+  });
+});
+
+/** `bind().sqlText` with each `?` replaced by the inline literal of its bind value. */
+function viaBind(query: Sql): string {
+  const { sqlText, binds } = bind(query);
+  let next = 0;
+  return sqlText.replaceAll('?', () =>
+    inline(sql`${(binds as SnowflakeBind[])[next++]}`),
+  );
+}
+
+void describe('snowflake bind and inline parity', async () => {
+  await it('inline equals bind with literals substituted (non-bytes, non-bigint values)', () => {
+    const query = sql`SELECT ${null}, ${true}, ${-1.5}, ${"it's \\"}, ${DATE} WHERE x IN (${join([1, 'a', false])}) AND y = ${"\\'; --"}`;
+    assert.strictEqual(viaBind(query), inline(query));
+  });
+
+  await it('holds for arbitrary strings', () => {
+    fc.assert(
+      fc.property(hostileText, hostileText, (a, b) => {
+        const query = sql`SELECT ${a}, ${b} -- end`;
+        assert.strictEqual(viaBind(query), inline(query));
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  await it('differs only where the types differ by design: bigint and bytes', () => {
+    // bind sends digits as text; inline emits a number literal. Bytes need TO_BINARY in both.
+    assert.strictEqual(bind(sql`SELECT ${7n}`).binds[0], '7');
+    assert.strictEqual(lit(7n), '7');
+    assert.strictEqual(
+      bind(sql`SELECT ${new Uint8Array([1])}`).sqlText,
+      "SELECT TO_BINARY(?, 'HEX')",
+    );
+    assert.strictEqual(lit(new Uint8Array([1])), "TO_BINARY('01', 'HEX')");
+  });
+});
+
 interface FakeExecuteOptions extends SnowflakeStatement {
   complete: (
     error: Error | undefined,
@@ -787,11 +1311,8 @@ void describe('snowflake execute contract', async () => {
 });
 
 void describe('snowflake consumer contract', async () => {
-  const luxon = { toISO: (): string => DATE_ISO };
-  const coerce = (value: unknown): unknown =>
-    typeof value === 'object' && value !== null && 'toISO' in value
-      ? (value as typeof luxon).toISO()
-      : value;
+  const luxon = LUXON;
+  const coerce = toIso;
 
   await it('IN (${join(values)})', () => {
     assert.deepStrictEqual(
