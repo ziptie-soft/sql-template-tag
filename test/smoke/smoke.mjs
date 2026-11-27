@@ -24,4 +24,16 @@ assert.equal(Sql, cjs.Sql);
 assert.ok(cjs.default`SELECT 1` instanceof Sql);
 assert.ok(query instanceof cjs.Sql);
 
+// The `./pinot` subpath shares the one core `Sql` class with the other format.
+const { identifier, inline } =
+  await import('@ziptie-soft/sql-template-tag/pinot');
+
+const ident = identifier('x');
+assert.ok(ident instanceof Sql);
+assert.ok(ident instanceof cjs.Sql);
+const nested = cjs.default`SELECT ${ident} FROM t WHERE a = ${1}`;
+assert.equal(nested.text, 'SELECT "x" FROM t WHERE a = $1');
+assert.deepEqual(nested.values, [1]);
+assert.equal(inline(nested), 'SELECT "x" FROM t WHERE a = 1');
+
 console.log('esm smoke ok');

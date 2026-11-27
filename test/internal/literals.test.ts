@@ -355,3 +355,15 @@ void describe('token fusion guards', async () => {
     }
   });
 });
+
+void describe('hexFallback with an overridden length', async () => {
+  await it('uses the intrinsic typed array length', () => {
+    class LongBytes extends Uint8Array {
+      override get length(): number {
+        return 8;
+      }
+    }
+
+    assert.strictEqual(hexFallback(new LongBytes([1, 2])), '0102');
+  });
+});
