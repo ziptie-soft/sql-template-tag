@@ -1,28 +1,25 @@
 {
-  "name": "@no-esm/sql-template-tag",
+  "$schema": "http://json.schemastore.org/package.json",
+  "name": "@ziptie-soft/sql-template-tag",
   "version": "5.2.2",
-  "description": "ESM-free SQL template string for preparing SQL statements, works with `pg`, `mysql`, `sqlite` and `oracledb`",
+  "description": "ES2015 tagged template string for preparing SQL statements, works with `pg`, `mysql`, `sqlite` and `oracledb`. Ships CommonJS and ESM.",
   "keywords": [
-    "sql",
-    "template",
-    "string",
-    "tag",
-    "no-esm",
     "commonjs",
+    "esm",
+    "mysql",
+    "oracle",
+    "oracledb",
     "pg",
     "postgres",
-    "mysql",
+    "sql",
     "sqlite",
-    "oracledb",
-    "oracle"
+    "string",
+    "tag",
+    "template"
   ],
-  "homepage": "https://github.com/SkeLLLa/sql-template-tag",
+  "homepage": "https://github.com/ziptie-soft/sql-template-tag#readme",
   "bugs": {
-    "url": "https://github.com/SkeLLLa/sql-template-tag/issues"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git://git@github.com:SkeLLLa/sql-template-tag.git"
+    "url": "https://github.com/ziptie-soft/sql-template-tag/issues"
   },
   "license": "MIT",
   "author": {
@@ -30,41 +27,93 @@
     "email": "hello@blakeembrey.com",
     "url": "http://blakeembrey.me"
   },
-  "exports": "./dist/index.js",
-  "typings": "dist/index.d.ts",
-  "files": [
-    "dist/"
+  "contributors": [
+    {
+      "name": "m03geek",
+      "url": "https://github.com/SkeLLLa"
+    }
   ],
-  "scripts": {
-    "benchmark": "tsx benchmarks/index.ts",
-    "build": "ts-scripts build",
-    "format": "ts-scripts format",
-    "lint": "ts-scripts lint",
-    "prepare": "ts-scripts install",
-    "prepublishOnly": "npm run build",
-    "specs": "ts-scripts specs",
-    "test": "ts-scripts test"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ziptie-soft/sql-template-tag.git"
   },
-  "devDependencies": {
-    "@borderless/ts-scripts": "^0.15.0",
-    "@types/bytes": "^3.1.0",
-    "@types/node": "^20.5.9",
-    "@vitest/coverage-v8": "^1.5.0",
-    "bytes": "^3.1.0",
-    "rimraf": "^5.0.1",
-    "tsx": "^4.6.0",
-    "typescript": "^5.2.2",
-    "vitest": "^1.5.0"
+  "directories": {
+    "doc": "docs",
+    "test": "test"
   },
-  "engines": {
-    "node": ">=14"
+  "files": [
+    "dist"
+  ],
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./package.json": "./package.json"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
-  "ts-scripts": {
-    "project": [
-      "tsconfig.build.json"
-    ]
-  }
+  "scripts": {
+    "benchmark": "tsx benchmarks/index.ts",
+    "build": "pnpm run build:clean && pnpm run build:node && pnpm run build:docs && pnpm run build:format",
+    "build:clean": "rm -rf dist",
+    "build:docs": "api-extractor run -l && api-documenter markdown -i ./temp -o ./docs/api",
+    "build:esm": "cp esm/index.mjs esm/index.d.mts dist/",
+    "build:format": "oxfmt",
+    "build:node": "tsc -p tsconfig.build.json && pnpm run build:esm",
+    "lint": "pnpm run lint:codestyle && pnpm run lint:packages",
+    "lint:codestyle": "oxlint && oxfmt --check",
+    "lint:dist": "publint --strict && attw --pack . --profile node16",
+    "lint:packages": "pnpm audit --prod --audit-level=high",
+    "release": "semantic-release",
+    "test": "pnpm run lint && pnpm run test:unit && pnpm run test:dual",
+    "test:dual": "pnpm run build:clean && pnpm run build:node && node test/smoke/smoke.cjs && node test/smoke/smoke.mjs && pnpm run lint:dist",
+    "test:unit": "node --no-warnings --import tsx --experimental-test-coverage --test-coverage-include='src/**' --test-coverage-lines=99 --test-coverage-branches=95 --test-coverage-functions=100 --test-reporter=lcov --test-reporter-destination=lcov.info --test 'test/**/*.test.ts'",
+    "test:unit:local": "node --no-warnings --import tsx --experimental-test-coverage --test-coverage-include='src/**' --test-coverage-lines=99 --test-coverage-branches=95 --test-coverage-functions=100 --test 'test/**/*.test.ts'"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@microsoft/api-documenter": "^7.30.20",
+    "@microsoft/api-extractor": "^7.60.1",
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^11.0.1",
+    "@semantic-release/github": "^12.0.11",
+    "@semantic-release/npm": "^13.2.0",
+    "@semantic-release/release-notes-generator": "^14.1.1",
+    "@tsconfig/node-lts": "^26.0.1",
+    "@tsconfig/strictest": "^2.0.9",
+    "@types/node": "^26.6.6",
+    "conventional-changelog-conventionalcommits": "^10.4.1",
+    "oxfmt": "^0.78.0",
+    "oxlint": "^1.93.0",
+    "oxlint-tsgolint": "^7.0.2007",
+    "publint": "^0.3.25",
+    "semantic-release": "^25.0.9",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=24.11.0"
+    }
+  },
+  "engines": {
+    "node": ">=24.11.0",
+    "pnpm": ">=12"
+  },
+  "packageManager": "pnpm@12.16.1"
 }

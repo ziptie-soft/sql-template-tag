@@ -1,0 +1,21 @@
+# fallow: dead code, duplication and complexity (`mise run lint:fallow`).
+# See https://fallow.tools/docs/
+
+# The semantic-release config (.releaserc.js) lives in this hidden directory.
+# esm/ is copied into dist/ by `build:esm`; its `./index.js` import only resolves there.
+ignorePatterns = ["!.release/**", "esm/**"]
+# Loaded by name through the `conventionalcommits` preset (.release/release-notes.js).
+ignoreDependencies = ["conventional-changelog-conventionalcommits"]
+
+[duplicates]
+# The `statement` and `text` getters in src/index.ts differ only in their placeholder prefix and
+# are kept separate on purpose (hot path, see benchmarks/).
+minLines = 7
+
+[health]
+# Ceilings match cccc.toml; lower them as the worst functions get split up.
+maxCyclomatic = 15
+maxCognitive = 15
+# The tests write lcov (node --test), not the Istanbul JSON fallow reads, so CRAP estimates are
+# meaningless. Gate on cyclomatic/cognitive complexity only.
+maxCrap = 10000.0
