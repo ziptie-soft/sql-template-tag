@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": false,
+    "outDir": ".test-build",
+    "rootDir": ".",
+    "sourceMap": true
+  },
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*", "test/**/*"]
+}

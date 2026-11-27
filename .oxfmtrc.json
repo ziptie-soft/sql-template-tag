@@ -27,6 +27,7 @@
     "**/*.xxx.*",
     "docs/",
     "lcov.info",
+    ".test-build/",
     "pnpm-lock.yaml"
   ]
 }

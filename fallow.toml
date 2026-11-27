@@ -1,9 +1,12 @@
 # fallow: dead code, duplication and complexity (`mise run lint:fallow`).
 # See https://fallow.tools/docs/
 
+# Tests run from tsc output (.test-build/, see `test:build`), so declare their sources as entries.
+entry = ["test/**/*.test.ts"]
 # The semantic-release config (.releaserc.js) lives in this hidden directory.
 # esm/ is copied into dist/ by `build:esm`; its `./index.js` import only resolves there.
-ignorePatterns = ["!.release/**", "esm/**"]
+# .test-build/ is the compiled test output.
+ignorePatterns = ["!.release/**", "esm/**", ".test-build/**"]
 # Loaded by name through the `conventionalcommits` preset (.release/release-notes.js).
 ignoreDependencies = ["conventional-changelog-conventionalcommits"]
 
