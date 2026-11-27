@@ -2,5 +2,11 @@
 // `require` share one `Sql` class (no dual-package hazard for `instanceof`).
 import cjs from './dialects/snowflake.js';
 
-export const { SqlDialectError, bareIdentifier, bind, identifier, variant } =
-  cjs;
+export const {
+  SqlDialectError,
+  bareIdentifier,
+  bind,
+  identifier,
+  inline,
+  variant,
+} = cjs;

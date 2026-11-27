@@ -6,6 +6,9 @@
  * Unsupported values throw `SqlDialectError`; nothing is ever silently stringified. A value
  * can never land inside a quote or comment, and `raw()` stays a trusted-input escape hatch.
  *
+ * `inline` renders the same query with every value as a literal, for multi-statement requests
+ * and logging.
+ *
  * Never use the core `.text` getter with Snowflake: its `$1` is a stage or column reference.
  *
  * @packageDocumentation
@@ -13,7 +16,10 @@
 
 import { raw, Sql } from '../index.js';
 import { SqlDialectError } from '../internal/errors.js';
-import { SNOWFLAKE_BIND_LEXER } from '../internal/lexer.js';
+import {
+  SNOWFLAKE_BIND_LEXER,
+  SNOWFLAKE_INLINE_LEXER,
+} from '../internal/lexer.js';
 import {
   assertBareIdentifier,
   classify,
@@ -22,12 +28,15 @@ import {
   hex,
   Kind,
   quoteIdentifier,
+  quoteSnowflakeString,
 } from '../internal/literals.js';
 import {
   applyCoerce,
   checkQuery,
   fail as renderFail,
+  literalRenderer,
   readCoerce,
+  renderInline,
 } from '../internal/render.js';
 
 export { SqlDialectError } from '../internal/errors.js';
@@ -115,6 +124,31 @@ export function bind(
   }
 
   return { sqlText, binds };
+}
+
+const renderLiteral = literalRenderer('snowflake', {
+  string: quoteSnowflakeString,
+  date: (value) => "'" + formatDateIso(value) + "'",
+  bytes: (value) => "TO_BINARY('" + hex(value) + "', 'HEX')",
+});
+
+/** Render a query to a Snowflake SQL string with every value inlined as a literal.
+ *
+ * For multi-statement requests (the driver does not support binds there) and for logging;
+ * prefer {@link bind} for single statements. Strings are single-quoted with `\` → `\\`,
+ * `'` → `''` and NUL → `\0`, because Snowflake processes backslash escapes. A `Date` renders
+ * as an ISO-8601 UTC string and a `Uint8Array` as `TO_BINARY('<hex>', 'HEX')`. Numbers must be
+ * finite safe integers or non-integers (use `bigint` for larger ones). A space is inserted
+ * where a literal would otherwise fuse with adjacent text (`a-${-1}`, `X${'41'}`). A bare `?`
+ * in the template text is kept as is. Throws {@link SqlDialectError} for unsupported values,
+ * values inside quotes or comments, or a malformed query. The input is never mutated.
+ *
+ * @public
+ */
+export function inline(query: Sql, options?: SnowflakeOptions): string {
+  const coerce = readCoerce(options, 'snowflake');
+  checkQuery(query, SNOWFLAKE_INLINE_LEXER);
+  return renderInline(query, coerce, renderLiteral);
 }
 
 /** A double-quoted, case-sensitive identifier: `"A"` or, for a list, `"DB"."S"."T"`.

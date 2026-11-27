@@ -12,24 +12,22 @@ import { empty, raw, Sql, type RawValue } from '../index.js';
 import { PINOT_LEXER } from '../internal/lexer.js';
 import {
   assertBareIdentifier,
-  classify,
   dateMillis,
   formatBigint,
   formatDateUtc,
   formatNumber,
   hex,
-  Kind,
-  needsSpaceAfter,
-  needsSpaceBefore,
   quoteIdentifier,
   quotePinotString,
 } from '../internal/literals.js';
 import {
-  applyCoerce,
   checkQuery,
   fail as renderFail,
+  literalRenderer,
   readCoerce,
+  renderInline,
   type Coerce,
+  type LiteralRenderer,
 } from '../internal/render.js';
 
 export { SqlDialectError } from '../internal/errors.js';
@@ -65,31 +63,23 @@ function renderDate(value: Date, style: DateStyle): string {
   return style === 'timestamp' ? 'CAST(' + text + ' AS TIMESTAMP)' : text;
 }
 
-function renderLiteral(
-  value: unknown,
-  style: DateStyle,
-  index: number,
-): string {
-  switch (classify(value, 'pinot', index)) {
-    case Kind.NULL:
-      return 'NULL';
-    case Kind.BOOLEAN:
-      return value === true ? 'TRUE' : 'FALSE';
-    case Kind.NUMBER:
-      return formatNumber(value as number);
-    case Kind.BIGINT:
-      return formatBigint(value as bigint);
-    case Kind.STRING:
-      return quotePinotString(value as string, index);
-    case Kind.DATE:
-      return renderDate(value as Date, style);
-    default:
-      return "X'" + hex(value as Uint8Array) + "'";
-  }
+function pinotRenderer(style: DateStyle): LiteralRenderer {
+  return literalRenderer('pinot', {
+    string: quotePinotString,
+    date: (value) => renderDate(value, style),
+    bytes: (value) => "X'" + hex(value) + "'",
+  });
 }
 
+// One renderer per date style, built once so the per-value loop allocates no closures.
+const RENDERERS: Readonly<Record<DateStyle, LiteralRenderer>> = {
+  string: pinotRenderer('string'),
+  epochMillis: pinotRenderer('epochMillis'),
+  timestamp: pinotRenderer('timestamp'),
+};
+
 function readOptions(options: PinotInlineOptions | undefined): {
-  dateStyle: DateStyle;
+  render: LiteralRenderer;
   coerce: Coerce | undefined;
 } {
   const coerce = readCoerce(options, 'pinot');
@@ -98,7 +88,7 @@ function readOptions(options: PinotInlineOptions | undefined): {
     return fail('invalid dateStyle');
   }
 
-  return { dateStyle, coerce };
+  return { render: RENDERERS[dateStyle], coerce };
 }
 
 /** Render a query to a Pinot SQL string with every value inlined as a literal.
@@ -112,27 +102,9 @@ function readOptions(options: PinotInlineOptions | undefined): {
  * @public
  */
 export function inline(query: Sql, options?: PinotInlineOptions): string {
-  const { dateStyle, coerce } = readOptions(options);
+  const { render, coerce } = readOptions(options);
   checkQuery(query, PINOT_LEXER);
-  const { strings, values } = query;
-
-  let out = strings[0] as string;
-  // Tracked instead of read back from `out`, which would flatten the string every iteration.
-  let last = out.charCodeAt(out.length - 1);
-  for (let i = 0; i < values.length; i++) {
-    const literal = renderLiteral(applyCoerce(coerce, values[i]), dateStyle, i);
-    const next = strings[i + 1] as string;
-    out += needsSpaceBefore(last) ? ' ' + literal : literal;
-    if (needsSpaceAfter(next.charCodeAt(0))) {
-      out += ' ';
-    }
-
-    out += next;
-    const tail = next.length > 0 ? next : literal;
-    last = tail.charCodeAt(tail.length - 1);
-  }
-
-  return out;
+  return renderInline(query, coerce, render);
 }
 
 /** A double-quoted, case-sensitive identifier: `"a"` or, for a list, `"a"."b"`.
