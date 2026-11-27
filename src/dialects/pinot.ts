@@ -9,11 +9,9 @@
  */
 
 import { empty, raw, Sql, type RawValue } from '../index.js';
-import { SqlDialectError } from '../internal/errors.js';
-import { assertValueBoundaries, PINOT_LEXER } from '../internal/lexer.js';
+import { PINOT_LEXER } from '../internal/lexer.js';
 import {
   assertBareIdentifier,
-  assertShape,
   classify,
   dateMillis,
   formatBigint,
@@ -26,6 +24,13 @@ import {
   quoteIdentifier,
   quotePinotString,
 } from '../internal/literals.js';
+import {
+  applyCoerce,
+  checkQuery,
+  fail as renderFail,
+  readCoerce,
+  type Coerce,
+} from '../internal/render.js';
 
 export { SqlDialectError } from '../internal/errors.js';
 
@@ -48,7 +53,7 @@ const DATE_STYLES: readonly unknown[] = ['string', 'epochMillis', 'timestamp'];
 const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function fail(reason: string): never {
-  throw new SqlDialectError('pinot', reason);
+  return renderFail('pinot', reason);
 }
 
 function renderDate(value: Date, style: DateStyle): string {
@@ -85,23 +90,12 @@ function renderLiteral(
 
 function readOptions(options: PinotInlineOptions | undefined): {
   dateStyle: DateStyle;
-  coerce: ((value: unknown) => unknown) | undefined;
+  coerce: Coerce | undefined;
 } {
-  if (options === undefined) {
-    return { dateStyle: 'string', coerce: undefined };
-  }
-
-  if (typeof options !== 'object' || options === null) {
-    return fail('options must be an object');
-  }
-
-  const { dateStyle = 'string', coerce } = options;
+  const coerce = readCoerce(options, 'pinot');
+  const { dateStyle = 'string' }: PinotInlineOptions = options ?? {};
   if (!DATE_STYLES.includes(dateStyle)) {
     return fail('invalid dateStyle');
-  }
-
-  if (coerce !== undefined && typeof coerce !== 'function') {
-    return fail('coerce must be a function');
   }
 
   return { dateStyle, coerce };
@@ -118,17 +112,15 @@ function readOptions(options: PinotInlineOptions | undefined): {
  * @public
  */
 export function inline(query: Sql, options?: PinotInlineOptions): string {
-  assertShape(query, 'pinot');
   const { dateStyle, coerce } = readOptions(options);
+  checkQuery(query, PINOT_LEXER);
   const { strings, values } = query;
-  assertValueBoundaries(strings, PINOT_LEXER);
 
   let out = strings[0] as string;
   // Tracked instead of read back from `out`, which would flatten the string every iteration.
   let last = out.charCodeAt(out.length - 1);
   for (let i = 0; i < values.length; i++) {
-    const value = coerce === undefined ? values[i] : coerce(values[i]);
-    const literal = renderLiteral(value, dateStyle, i);
+    const literal = renderLiteral(applyCoerce(coerce, values[i]), dateStyle, i);
     const next = strings[i + 1] as string;
     out += needsSpaceBefore(last) ? ' ' + literal : literal;
     if (needsSpaceAfter(next.charCodeAt(0))) {

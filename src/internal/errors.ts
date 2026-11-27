@@ -14,9 +14,14 @@ export class SqlDialectError extends TypeError {
   readonly index: number | undefined;
   readonly reason: string;
 
-  constructor(dialect: Dialect, reason: string, index?: number) {
+  constructor(
+    dialect: Dialect,
+    reason: string,
+    index?: number,
+    options?: { readonly cause?: unknown },
+  ) {
     const suffix = index === undefined ? '' : ` (value #${index})`;
-    super(`[${dialect}] ${reason}${suffix}`);
+    super(`[${dialect}] ${reason}${suffix}`, options);
     this.dialect = dialect;
     this.index = index;
     this.reason = reason;
