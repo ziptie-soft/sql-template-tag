@@ -43,12 +43,12 @@ function classifyNumber(value: number, dialect: Dialect, index: number): Kind {
 }
 
 function classifyDate(value: Date, dialect: Dialect, index: number): Kind {
-  const time = value.getTime();
+  const time = getTime.call(value);
   if (Number.isNaN(time)) {
     return invalid(dialect, 'invalid date', index);
   }
 
-  const year = value.getUTCFullYear();
+  const year = getUTCFullYear.call(value);
   if (year < 0 || year > 9999) {
     return invalid(dialect, 'date out of range', index);
   }
@@ -56,15 +56,40 @@ function classifyDate(value: Date, dialect: Dialect, index: number): Kind {
   return Kind.DATE;
 }
 
-// Brand checks that read internal slots, so they work across realms (vm, jest)
-// and cannot be spoofed with `Symbol.toStringTag`.
-const { getTime } = Date.prototype as { getTime: (this: unknown) => number };
-const typedArrayTag = (
-  Object.getOwnPropertyDescriptor(
-    Object.getPrototypeOf(Uint8Array.prototype) as object,
-    Symbol.toStringTag,
-  ) as { get: (this: unknown) => string | undefined }
-).get;
+// Intrinsics captured at load time. They read internal slots, so they work across realms
+// (vm, jest), cannot be spoofed with `Symbol.toStringTag`, and ignore methods or getters
+// overridden by a `Date` / `Uint8Array` subclass (which could otherwise return SQL text).
+const { getTime, getUTCFullYear, toISOString } = Date.prototype as {
+  getTime: (this: unknown) => number;
+  getUTCFullYear: (this: unknown) => number;
+  toISOString: (this: unknown) => string;
+};
+const typedArrayPrototype = Object.getPrototypeOf(
+  Uint8Array.prototype,
+) as object;
+type Getter = (this: unknown) => unknown;
+function intrinsicGetter(key: PropertyKey): Getter {
+  return (
+    Object.getOwnPropertyDescriptor(typedArrayPrototype, key) as {
+      get: Getter;
+    }
+  ).get;
+}
+const typedArrayTag = intrinsicGetter(Symbol.toStringTag) as (
+  this: unknown,
+) => string | undefined;
+const typedArrayLength = intrinsicGetter('length') as (this: unknown) => number;
+const typedArrayBuffer = intrinsicGetter('buffer') as (
+  this: unknown,
+) => ArrayBufferLike;
+
+/** Epoch milliseconds of a validated date, read through the intrinsic `getTime`.
+ *
+ * @internal
+ */
+export function dateMillis(value: Date): number {
+  return getTime.call(value);
+}
 
 function isDate(value: object): value is Date {
   try {
@@ -84,7 +109,8 @@ function classifyBytes(
   dialect: Dialect,
   index: number,
 ): Kind {
-  if ((value.buffer as { detached?: boolean }).detached === true) {
+  const buffer = typedArrayBuffer.call(value) as { detached?: boolean };
+  if (buffer.detached === true) {
     return invalid(dialect, 'byte array buffer is detached', index);
   }
 
@@ -178,14 +204,22 @@ export function formatBigint(value: bigint): string {
  * @internal
  */
 export function formatDateUtc(value: Date): string {
-  return value.toISOString().replace('T', ' ').slice(0, 23);
+  return formatDateIso(value).replace('T', ' ').slice(0, 23);
+}
+
+/** ISO-8601 UTC text of a validated date, read through the intrinsic `toISOString`.
+ *
+ * @internal
+ */
+export function formatDateIso(value: Date): string {
+  return toISOString.call(value);
 }
 
 /** Quote a string using Apache Pinot's Calcite string rules.
  *
  * @internal
  */
-export function quotePinotString(value: string, index: number): string {
+export function quotePinotString(value: string, index?: number): string {
   if (value.indexOf('\0') !== -1) {
     throw new SqlDialectError('pinot', 'NUL is not allowed in strings', index);
   }
@@ -259,7 +293,9 @@ const HEX_TABLE: readonly string[] = Array.from(
  */
 export function hexFallback(bytes: Uint8Array): string {
   let result = '';
-  for (let i = 0; i < bytes.length; i++) {
+  // Intrinsic length: a subclass `length` getter could point past the end (`undefined`).
+  const length = typedArrayLength.call(bytes);
+  for (let i = 0; i < length; i++) {
     result += HEX_TABLE[bytes[i] as number];
   }
 

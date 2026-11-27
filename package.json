@@ -58,6 +58,16 @@
         "default": "./dist/index.js"
       }
     },
+    "./pinot": {
+      "import": {
+        "types": "./dist/pinot.d.mts",
+        "default": "./dist/pinot.mjs"
+      },
+      "require": {
+        "types": "./dist/dialects/pinot.d.ts",
+        "default": "./dist/dialects/pinot.js"
+      }
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -69,7 +79,7 @@
     "build": "pnpm run build:clean && pnpm run build:node && pnpm run build:docs && pnpm run build:format",
     "build:clean": "rm -rf dist",
     "build:docs": "api-extractor run -l && api-documenter markdown -i ./temp -o ./docs/api",
-    "build:esm": "cp esm/index.mjs esm/index.d.mts dist/",
+    "build:esm": "cp esm/*.mjs esm/*.d.mts dist/",
     "build:format": "oxfmt",
     "build:node": "tsc -p tsconfig.build.json && pnpm run build:esm",
     "lint": "pnpm run lint:codestyle && pnpm run lint:packages",
@@ -98,6 +108,7 @@
     "@tsconfig/strictest": "^2.0.9",
     "@types/node": "^26.6.6",
     "conventional-changelog-conventionalcommits": "^10.4.1",
+    "fast-check": "^4.11.0",
     "oxfmt": "^0.78.0",
     "oxlint": "^1.93.0",
     "oxlint-tsgolint": "^7.0.2007",

@@ -13,4 +13,25 @@ assert.ok(pkg.empty instanceof pkg.Sql);
 assert.ok(pkg.raw('x') instanceof pkg.Sql);
 assert.ok(pkg.bulk([[1]]) instanceof pkg.Sql);
 
-console.log('cjs smoke ok');
+// The `./pinot` subpath shares the one core `Sql` class with the other format.
+const pinot = require('@ziptie-soft/sql-template-tag/pinot');
+
+const ident = pinot.identifier('x');
+assert.ok(ident instanceof pkg.Sql);
+const nested = pkg.default`SELECT ${ident} FROM t WHERE a = ${1}`;
+assert.equal(nested.text, 'SELECT "x" FROM t WHERE a = $1');
+assert.deepEqual(nested.values, [1]);
+assert.equal(pinot.inline(nested), 'SELECT "x" FROM t WHERE a = 1');
+
+import('@ziptie-soft/sql-template-tag')
+  .then((esm) => {
+    assert.ok(ident instanceof esm.Sql);
+    const mixed = esm.default`SELECT ${ident}`;
+    assert.equal(mixed.text, 'SELECT "x"');
+    assert.deepEqual(mixed.values, []);
+    console.log('cjs smoke ok');
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
