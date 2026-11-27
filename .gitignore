@@ -61,3 +61,6 @@ lcov.info
 # Misc
 coverage
 .DS_Store
+
+# Compiled tests for coverage (`pnpm run test:build`)
+.test-build
