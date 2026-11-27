@@ -2,15 +2,19 @@
   "$schema": "http://json.schemastore.org/package.json",
   "name": "@ziptie-soft/sql-template-tag",
   "version": "5.2.2",
-  "description": "ES2015 tagged template string for preparing SQL statements, works with `pg`, `mysql`, `sqlite` and `oracledb`. Ships CommonJS and ESM.",
+  "description": "ES2015 tagged template string for preparing SQL statements, works with `pg`, `mysql`, `sqlite` and `oracledb`, with Snowflake and Apache Pinot dialects. Ships CommonJS and ESM.",
   "keywords": [
+    "apache-pinot",
+    "calcite",
     "commonjs",
     "esm",
     "mysql",
     "oracle",
     "oracledb",
     "pg",
+    "pinot",
     "postgres",
+    "snowflake",
     "sql",
     "sqlite",
     "string",
@@ -45,8 +49,19 @@
     "dist"
   ],
   "type": "commonjs",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "pinot": [
+        "./dist/dialects/pinot.d.ts"
+      ],
+      "snowflake": [
+        "./dist/dialects/snowflake.d.ts"
+      ]
+    }
+  },
   "exports": {
     ".": {
       "import": {
