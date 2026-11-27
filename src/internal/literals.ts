@@ -311,10 +311,14 @@ const nativeToHex = (Uint8Array.prototype as Uint8ArrayWithToHex).toHex;
  *
  * @internal
  */
+// A bound intrinsic rather than a wrapper function, so no function exists only on runtimes
+// with `toHex` (Node.js 25+); coverage is then the same on every supported runtime.
 export const hex: (bytes: Uint8Array) => string =
   nativeToHex === undefined
     ? hexFallback
-    : (bytes: Uint8Array): string => nativeToHex.call(bytes);
+    : (Function.prototype.call.bind(nativeToHex) as (
+        bytes: Uint8Array,
+      ) => string);
 
 function quoteIdentifierPart(
   part: string,
