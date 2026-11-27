@@ -52,4 +52,43 @@ assert.equal(
   'SELECT PARSE_JSON(?)',
 );
 
+// Rendering through both subpaths.
+assert.equal(
+  inline(sql`SELECT ${"it's"}, ${'a\\b'}`),
+  "SELECT 'it''s', 'a\\b'",
+);
+assert.equal(
+  snowflake.inline(sql`SELECT ${"it's"}, ${'a\\b'}`),
+  "SELECT 'it''s', 'a\\\\b'",
+);
+
+// Fragments from the CommonJS entries nest in the ESM `sql` and are treated as text.
+const require = createRequire(import.meta.url);
+const cjsPinot = require('@ziptie-soft/sql-template-tag/pinot');
+const cjsSnowflake = require('@ziptie-soft/sql-template-tag/snowflake');
+const fromCjs = sql`SELECT ${cjsPinot.identifier('z')}, ${cjsSnowflake.identifier('w')} FROM t WHERE a = ${1}`;
+assert.equal(fromCjs.text, 'SELECT "z", "w" FROM t WHERE a = $1');
+assert.deepEqual(fromCjs.values, [1]);
+
+// `SqlDialectError` is one class across both subpaths and both formats.
+const { SqlDialectError } = snowflake;
+assert.equal(SqlDialectError, cjsPinot.SqlDialectError);
+assert.equal(SqlDialectError, cjsSnowflake.SqlDialectError);
+assert.equal(
+  SqlDialectError,
+  (await import('@ziptie-soft/sql-template-tag/pinot')).SqlDialectError,
+);
+for (const render of [
+  () => inline(sql`SELECT ${undefined}`),
+  () => snowflake.bind(sql`SELECT ${undefined}`),
+  () => cjsPinot.inline(sql`SELECT ${undefined}`),
+]) {
+  assert.throws(render, (error) => {
+    assert.ok(error instanceof SqlDialectError);
+    assert.ok(error instanceof TypeError);
+    assert.equal(error.index, 0);
+    return true;
+  });
+}
+
 console.log('esm smoke ok');
