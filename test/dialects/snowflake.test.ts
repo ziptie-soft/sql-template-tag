@@ -1664,7 +1664,7 @@ void describe('snowflake consumer contract', async () => {
   const luxon = LUXON;
   const coerce = toIso;
 
-  await it('IN (${join(values)})', () => {
+  await it('IN list via join(values)', () => {
     assert.deepStrictEqual(
       bind(sql`SELECT * FROM t WHERE id IN (${join([1, 'a', DATE, luxon])})`, {
         coerce,
@@ -1676,7 +1676,7 @@ void describe('snowflake consumer contract', async () => {
     );
   });
 
-  await it('ARRAY_CONSTRUCT(${join(values)})', () => {
+  await it('ARRAY_CONSTRUCT via join(values)', () => {
     assert.deepStrictEqual(
       bind(sql`SELECT ARRAY_CONSTRUCT(${join(['a', 'b', null])})`),
       { sqlText: 'SELECT ARRAY_CONSTRUCT(?,?,?)', binds: ['a', 'b', null] },
@@ -1694,7 +1694,7 @@ void describe('snowflake consumer contract', async () => {
     );
   });
 
-  await it('session SET (${join(names.map(bareIdentifier), ", ")}) = (${join(binds)})', () => {
+  await it('session SET with join(names.map(bareIdentifier)) = join(binds)', () => {
     const names = ['TENANT_ID', 'REQUEST_ID', 'DEADLINE'];
     const binds = ['t-1', null, luxon];
     assert.deepStrictEqual(
@@ -1713,7 +1713,7 @@ void describe('snowflake consumer contract', async () => {
     );
   });
 
-  await it('SHOW … IN ${identifier([db, schema, view])}', () => {
+  await it('SHOW … IN identifier([db, schema, view])', () => {
     assert.deepStrictEqual(
       bind(sql`SHOW COLUMNS IN VIEW ${identifier(['MY_DB', 'public', 'v"1'])}`),
       { sqlText: 'SHOW COLUMNS IN VIEW "MY_DB"."public"."v""1"', binds: [] },
