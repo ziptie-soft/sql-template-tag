@@ -1,0 +1,103 @@
+name: release
+
+on:
+  push:
+    branches:
+      - master
+      - next
+
+# Nothing is granted by default; each job asks for what it needs.
+permissions: {}
+
+# Releases queue instead of cancelling: a cancelled semantic-release run can leave a tag without
+# its npm publish. The `-caller` suffix keeps this group apart from the called OSV workflow's.
+concurrency:
+  group: ${{ github.workflow }}-caller-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        name: Install pnpm
+        id: pnpm-install
+        with:
+          run_install: false
+      - name: Use Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm oxlint -f github
+      - name: Build
+        run: pnpm build
+      - name: Test
+        run: pnpm test
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          disable_search: true
+          files: ./lcov.info
+          flags: js_open_source
+          fail_ci_if_error: false
+          verbose: true
+  osv:
+    uses: 'google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@32d3cd482bdadfb38b186c0ad1b031902d55d932' # v2.7.1
+    with:
+      scan-args: |-
+        ./
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - verify
+      - osv
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+      packages: write
+      checks: write
+    steps:
+      # semantic-release pushes the release commit and tag with these credentials.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        name: Install pnpm
+        id: pnpm-install
+        with:
+          run_install: false
+      # Node 26 bundles npm 11.x, which publishes through OIDC trusted publishing.
+      - name: Use Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Semantic Release
+        run: pnpm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # NPM_TOKEN not needed - using OIDC provenance

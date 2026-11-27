@@ -1,0 +1,21 @@
+name: 'OSV'
+
+on:
+  push:
+    branches: ['master']
+  schedule:
+    - cron: '30 22 * * 5'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-full-caller-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan-scheduled:
+    uses: 'google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@32d3cd482bdadfb38b186c0ad1b031902d55d932' # v2.7.1
+    permissions:
+      actions: read
+      security-events: write
+      contents: read
