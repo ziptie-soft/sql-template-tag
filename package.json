@@ -86,6 +86,7 @@
   },
   "scripts": {
     "benchmark": "tsx benchmarks/index.ts",
+    "benchmark:dialects": "tsx benchmarks/dialects.ts",
     "build": "pnpm run build:clean && pnpm run build:node && pnpm run build:docs && pnpm run build:format",
     "build:clean": "rm -rf dist",
     "build:docs": "api-extractor run -l && api-documenter markdown -i ./temp -o ./docs/api",
