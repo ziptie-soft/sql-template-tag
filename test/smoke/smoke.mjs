@@ -36,4 +36,20 @@ assert.equal(nested.text, 'SELECT "x" FROM t WHERE a = $1');
 assert.deepEqual(nested.values, [1]);
 assert.equal(inline(nested), 'SELECT "x" FROM t WHERE a = 1');
 
+// Same for `./snowflake`.
+const snowflake = await import('@ziptie-soft/sql-template-tag/snowflake');
+
+const sfIdent = snowflake.identifier('x');
+assert.ok(sfIdent instanceof Sql);
+assert.ok(sfIdent instanceof cjs.Sql);
+const sfNested = cjs.default`SELECT ${sfIdent} FROM t WHERE a = ${1}`;
+assert.deepEqual(snowflake.bind(sfNested), {
+  sqlText: 'SELECT "x" FROM t WHERE a = ?',
+  binds: [1],
+});
+assert.equal(
+  snowflake.bind(sql`SELECT ${snowflake.variant({ a: 1 })}`).sqlText,
+  'SELECT PARSE_JSON(?)',
+);
+
 console.log('esm smoke ok');

@@ -68,6 +68,16 @@
         "default": "./dist/dialects/pinot.js"
       }
     },
+    "./snowflake": {
+      "import": {
+        "types": "./dist/snowflake.d.mts",
+        "default": "./dist/snowflake.mjs"
+      },
+      "require": {
+        "types": "./dist/dialects/snowflake.d.ts",
+        "default": "./dist/dialects/snowflake.js"
+      }
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {

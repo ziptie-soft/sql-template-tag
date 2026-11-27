@@ -23,12 +23,29 @@ assert.equal(nested.text, 'SELECT "x" FROM t WHERE a = $1');
 assert.deepEqual(nested.values, [1]);
 assert.equal(pinot.inline(nested), 'SELECT "x" FROM t WHERE a = 1');
 
+// Same for `./snowflake`.
+const snowflake = require('@ziptie-soft/sql-template-tag/snowflake');
+
+const sfIdent = snowflake.identifier('x');
+assert.ok(sfIdent instanceof pkg.Sql);
+const sfNested = pkg.default`SELECT ${sfIdent} FROM t WHERE a = ${1}`;
+assert.deepEqual(snowflake.bind(sfNested), {
+  sqlText: 'SELECT "x" FROM t WHERE a = ?',
+  binds: [1],
+});
+
 import('@ziptie-soft/sql-template-tag')
-  .then((esm) => {
+  .then(async (esm) => {
     assert.ok(ident instanceof esm.Sql);
+    assert.ok(sfIdent instanceof esm.Sql);
     const mixed = esm.default`SELECT ${ident}`;
     assert.equal(mixed.text, 'SELECT "x"');
     assert.deepEqual(mixed.values, []);
+    const sfEsm = await import('@ziptie-soft/sql-template-tag/snowflake');
+    assert.equal(
+      sfEsm.bind(esm.default`SELECT ${sfEsm.identifier('y')}`).sqlText,
+      'SELECT "y"',
+    );
     console.log('cjs smoke ok');
   })
   .catch((error) => {
