@@ -42,14 +42,16 @@ function classifyNumber(value: number, dialect: Dialect, index: number): Kind {
   return Kind.NUMBER;
 }
 
-function classifyDate(value: Date, dialect: Dialect, index: number): Kind {
-  const time = getTime.call(value);
+/** `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z` in epoch milliseconds. */
+const MIN_DATE_TIME = -62_167_219_200_000;
+const MAX_DATE_TIME = 253_402_300_799_999;
+
+function classifyDate(time: number, dialect: Dialect, index: number): Kind {
   if (Number.isNaN(time)) {
     return invalid(dialect, 'invalid date', index);
   }
 
-  const year = getUTCFullYear.call(value);
-  if (year < 0 || year > 9999) {
+  if (time < MIN_DATE_TIME || time > MAX_DATE_TIME) {
     return invalid(dialect, 'date out of range', index);
   }
 
@@ -59,9 +61,8 @@ function classifyDate(value: Date, dialect: Dialect, index: number): Kind {
 // Intrinsics captured at load time. They read internal slots, so they work across realms
 // (vm, jest), cannot be spoofed with `Symbol.toStringTag`, and ignore methods or getters
 // overridden by a `Date` / `Uint8Array` subclass (which could otherwise return SQL text).
-const { getTime, getUTCFullYear, toISOString } = Date.prototype as {
+const { getTime, toISOString } = Date.prototype as {
   getTime: (this: unknown) => number;
-  getUTCFullYear: (this: unknown) => number;
   toISOString: (this: unknown) => string;
 };
 const typedArrayPrototype = Object.getPrototypeOf(
@@ -91,12 +92,12 @@ export function dateMillis(value: Date): number {
   return getTime.call(value);
 }
 
-function isDate(value: object): value is Date {
+/** The time value of a real `Date` (brand check via the intrinsic), or `undefined`. */
+function dateTimeOf(value: object): number | undefined {
   try {
-    getTime.call(value);
-    return true;
+    return getTime.call(value);
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -122,8 +123,9 @@ function classifyObject(value: object, dialect: Dialect, index: number): Kind {
     return invalid(dialect, 'arrays are not values; use join()', index);
   }
 
-  if (isDate(value)) {
-    return classifyDate(value, dialect, index);
+  const time = dateTimeOf(value);
+  if (time !== undefined) {
+    return classifyDate(time, dialect, index);
   }
 
   if (isUint8Array(value)) {

@@ -19,8 +19,10 @@ import {
   type LexerConfig,
 } from '../src/internal/lexer.js';
 
-// Budgets (blueprint §5).
-const TYPICAL_MAX_RATIO = 2;
+// Budgets (blueprint §5). (a) was revised from 2× to 4×: the core baseline does no per-value
+// work, while every dialect render lexes the template and validates each value through
+// intrinsics (e.g. `Date.prototype.toISOString`), which a subclass cannot override.
+const TYPICAL_MAX_RATIO = 4;
 const LINEAR_MAX_RATIO = 10.5;
 const LEXER_100KB_MAX_MS = 5;
 const LEXER_ADVERSARIAL_MAX_MS = 50;
