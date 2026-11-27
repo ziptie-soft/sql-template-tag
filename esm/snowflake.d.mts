@@ -8,6 +8,7 @@ export {
   bind,
   identifier,
   inline,
+  rows,
   SqlDialectError,
   variant,
 } from './dialects/snowflake.js';
