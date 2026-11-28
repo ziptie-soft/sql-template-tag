@@ -1,7 +1,7 @@
 {
   "$schema": "http://json.schemastore.org/package.json",
   "name": "@ziptie-soft/sql-template-tag",
-  "version": "5.2.2",
+  "version": "1.0.0",
   "description": "ES2015 tagged template string for preparing SQL statements, works with `pg`, `mysql`, `sqlite` and `oracledb`, with Snowflake and Apache Pinot dialects. Ships CommonJS and ESM.",
   "keywords": [
     "apache-pinot",
