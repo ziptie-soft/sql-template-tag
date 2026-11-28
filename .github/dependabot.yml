@@ -6,6 +6,12 @@ updates:
       interval: 'weekly'
     cooldown:
       default-days: 7
+    ignore:
+      # v10 needs conventional-changelog-writer@9, but the stable
+      # @semantic-release/release-notes-generator (14.x) still ships writer@8.
+      # Lift this once release-notes-generator 15 is out.
+      - dependency-name: 'conventional-changelog-conventionalcommits'
+        update-types: ['version-update:semver-major']
     groups:
       production-major:
         dependency-type: 'production'
